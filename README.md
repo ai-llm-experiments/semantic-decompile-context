@@ -27,7 +27,7 @@ flowchart TD
 2. **Recover rebuildable C** — The reconstruct pipeline only promotes functions that compile and pass objdiff with zero differences. Everything else stays in advisory folders with honest labels.
 3. **Run your way** — Stdio for desktop MCP clients, HTTP at `/mcp` for scripts and remote use, optional browser UI when you start the server locally.
 
-Verified C requires compile plus objdiff 0; terminal recovery additionally requires a fresh whole-image byte-identical rebuild, with C+assembly-floor and max-C variants separately measured.
+A finished dashboard job is not a match. Verified C requires compile plus objdiff 0; terminal recovery additionally requires a fresh whole-image byte-identical rebuild, with C+assembly-floor and max-C variants separately measured.
 
 Source lives at [github.com/bodencrouch/AgentDecompile](https://github.com/bodencrouch/AgentDecompile). The published container image is still `docker.io/bolabaden/agentdecompile-mcp`. The Pages site is [bodecloud.github.io/AgentDecompile](https://bodecloud.github.io/AgentDecompile/).
 

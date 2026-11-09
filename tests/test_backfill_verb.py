@@ -30,6 +30,10 @@ def _raw_slug(repo_path: str) -> str:
     return repo_path.strip("/").replace("/", "__")
 
 
+def _receipt_slug(slug: str) -> str:
+    return "slug-" + hashlib.sha256(slug.encode("utf-8")).hexdigest()[:12]
+
+
 @pytest.fixture
 def fixture_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     raw_dir = tmp_path / "raw"
@@ -89,28 +93,27 @@ def test_content_sha256_pass_runs_then_resumes(fixture_db: Path, tmp_path: Path)
     report = first["passes"]["content_sha256"]
     assert report["counts"] == {"updated": 1, "unchanged": 0, "skipped": 1, "resumed": 0}
     assert report["binaries"] == [
-        {"id": 1, "slug": "build-a", "status": "updated"},
-        {"id": 2, "slug": "build-b", "status": "skipped", "reason": "no_raw_image"},
+        {"identity": digest, "status": "updated"},
+        {"identity": _receipt_slug("build-b"), "status": "skipped", "reason": "no_raw_image"},
     ]
     assert _content_sha(fixture_db) == [(1, digest), (2, None)]
 
     after_first = _receipts(receipts)
     assert sorted(after_first) == [
         f"content_sha256/{digest}.json",
-        "content_sha256/slug-build-b.json",
+        f"content_sha256/{_receipt_slug('build-b')}.json",
     ]
     with_image = json.loads(after_first[f"content_sha256/{digest}.json"])
     assert with_image["key"] == {"pass": "content_sha256", "identity": digest}
-    assert with_image["status"] == "updated"
     assert with_image["result"] == {"content_sha256": digest}
-    assert with_image["binary"]["id"] == 1
-    no_image = json.loads(after_first["content_sha256/slug-build-b.json"])
-    assert no_image["key"] == {"pass": "content_sha256", "identity": "build-b"}
-    assert no_image["status"] == "skipped"
+    assert with_image["binary"]["identity"] == digest
+    no_image = json.loads(after_first[f"content_sha256/{_receipt_slug('build-b')}.json"])
+    assert no_image["key"] == {"pass": "content_sha256", "identity": _receipt_slug("build-b")}
     assert no_image["result"] == {"reason": "no_raw_image"}
-    assert no_image["raw_image"] is None
     for body in after_first.values():
         text = body.decode("utf-8")
+        assert "build-a" not in text and "build-b" not in text
+        assert '"slug"' not in text and '"repo_path"' not in text and '"id"' not in text
         assert "applied_at" not in text and "timestamp" not in text
         assert body == (json.dumps(json.loads(text), sort_keys=True, indent=2) + "\n").encode()
 
@@ -127,7 +130,7 @@ def test_content_sha256_pass_runs_then_resumes(fixture_db: Path, tmp_path: Path)
     assert _content_sha(fixture_db) == [(1, digest), (2, None)]
 
 
-def test_no_resume_rewrites_completed_receipt_status(fixture_db: Path, tmp_path: Path) -> None:
+def test_no_resume_rewrites_identical_receipts(fixture_db: Path, tmp_path: Path) -> None:
     receipts = tmp_path / "receipts"
     con = store.connect(fixture_db)
     backfill.run(con, ["content_sha256"], receipts_dir=receipts)
@@ -138,10 +141,12 @@ def test_no_resume_rewrites_completed_receipt_status(fixture_db: Path, tmp_path:
         "updated": 0, "unchanged": 1, "skipped": 1, "resumed": 0,
     }
     after = _receipts(receipts)
-    assert after != before
+    assert after == before
     digest = hashlib.sha256(IMAGE_BYTES).hexdigest()
-    assert json.loads(after[f"content_sha256/{digest}.json"])["status"] == "unchanged"
-    assert after["content_sha256/slug-build-b.json"] == before["content_sha256/slug-build-b.json"]
+    assert json.loads(after[f"content_sha256/{digest}.json"])["result"] == {"content_sha256": digest}
+    assert after[f"content_sha256/{_receipt_slug('build-b')}.json"] == before[
+        f"content_sha256/{_receipt_slug('build-b')}.json"
+    ]
 
 
 def test_changed_image_gets_a_new_receipt_and_a_new_digest(fixture_db: Path, tmp_path: Path) -> None:
@@ -247,14 +252,16 @@ def test_analyzer_identity_fills_only_null_rows_and_resumes(fixture_db: Path, tm
         (1, "70.1", processor_spec_hash_for("x86:LE:32:default"), basis_hash_for("70.1"), "ingest"),
         (2, "77.0", processor_spec_hash_for("arm:LE:32:v7"), basis_hash_for("77.0"), "backfill"),
     ]
-    body = json.loads((receipts / "analyzer_identity" / "slug-build-b.json").read_text(encoding="utf-8"))
+    receipt_path = receipts / "analyzer_identity" / f"{_receipt_slug('build-b')}.json"
+    body = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert body["result"] == {
         "analyzer_version": "77.0",
         "processor_spec_hash": processor_spec_hash_for("arm:LE:32:v7"),
         "basis_hash": basis_hash_for("77.0"),
         "basis_source": "backfill",
     }
-    assert body["raw_image"] is None or body["raw_image"].endswith(_raw_slug(WITHOUT_IMAGE))
+    assert body["raw_image_present"] is False
+    assert "build-b" not in receipt_path.read_text(encoding="utf-8")
 
     con = store.connect(fixture_db)
     again = backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
@@ -336,9 +343,11 @@ def test_skipped_receipt_is_not_resumed_once_the_install_appears(
     con.commit()
     first = backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
     assert first["passes"]["analyzer_identity"]["counts"]["skipped"] == 2
-    body = json.loads((receipts / "analyzer_identity" / "slug-build-b.json").read_text(encoding="utf-8"))
-    assert body["status"] == "skipped"
+    receipt_path = receipts / "analyzer_identity" / f"{_receipt_slug('build-b')}.json"
+    body = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert body["result"] == {"reason": "no_install"}
+    assert "status" not in body
+    assert "build-b" not in receipt_path.read_text(encoding="utf-8")
 
     root = tmp_path / "install"
     (root / "Ghidra").mkdir(parents=True)
@@ -365,7 +374,7 @@ def test_resume_reruns_when_the_row_no_longer_satisfies_the_pass(fixture_db: Pat
     backfill.run(con, ["content_sha256"], receipts_dir=receipts)
     digest = hashlib.sha256(IMAGE_BYTES).hexdigest()
     body = json.loads((receipts / "content_sha256" / f"{digest}.json").read_text(encoding="utf-8"))
-    assert body["status"] == "updated"
+    assert body["result"] == {"content_sha256": digest}
     # The row lost its hash after the receipt was written (a restore, a
     # hand edit, another store sharing this receipts dir).
     con.execute("UPDATE binary SET content_sha256=NULL WHERE id=1")
@@ -377,20 +386,58 @@ def test_resume_reruns_when_the_row_no_longer_satisfies_the_pass(fixture_db: Pat
     assert _content_sha(fixture_db)[0] == (1, digest)
 
 
-def test_receipt_without_status_is_rerun(fixture_db: Path, tmp_path: Path, install: Path) -> None:
+def test_receipt_without_status_resumes_when_row_satisfies_pass(
+    fixture_db: Path, tmp_path: Path, install: Path
+) -> None:
     receipts = tmp_path / "r"
     con = store.connect(fixture_db)
     con.execute("UPDATE binary SET language_id='x86:LE:32:default'")
     con.commit()
     backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
-    # A receipt from before the status field existed: same key, no status.
-    path = receipts / "analyzer_identity" / "slug-build-b.json"
+    path = receipts / "analyzer_identity" / f"{_receipt_slug('build-b')}.json"
     legacy = json.loads(path.read_text(encoding="utf-8"))
-    legacy.pop("status")
-    path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert "status" not in legacy
     again = backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
     con.close()
     assert again["passes"]["analyzer_identity"]["counts"] == {
-        "updated": 0, "unchanged": 1, "skipped": 0, "resumed": 1,
+        "updated": 0, "unchanged": 0, "skipped": 0, "resumed": 2,
     }
-    assert json.loads(path.read_text(encoding="utf-8"))["status"] == "unchanged"
+    assert "build-b" not in path.read_text(encoding="utf-8")
+
+
+def test_legacy_slug_receipt_migrates_to_hashed_stem(
+    fixture_db: Path, tmp_path: Path, install: Path
+) -> None:
+    receipts = tmp_path / "r"
+    con = store.connect(fixture_db)
+    con.execute("UPDATE binary SET language_id='x86:LE:32:default'")
+    con.commit()
+    backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
+
+    hashed_path = receipts / "analyzer_identity" / f"{_receipt_slug('build-b')}.json"
+    hashed_body = json.loads(hashed_path.read_text(encoding="utf-8"))
+    legacy_path = receipts / "analyzer_identity" / "slug-build-b.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "key": {"pass": "analyzer_identity", "identity": "build-b"},
+                "binary": {"id": 2, "slug": "build-b", "repo_path": WITHOUT_IMAGE},
+                "raw_image": None,
+                "result": hashed_body["result"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    hashed_path.unlink()
+
+    summary = backfill.run(con, ["analyzer_identity"], receipts_dir=receipts)
+    con.close()
+
+    assert summary["passes"]["analyzer_identity"]["counts"]["resumed"] == 2
+    assert not legacy_path.exists()
+    assert hashed_path.is_file()
+    migrated = hashed_path.read_text(encoding="utf-8")
+    assert "build-b" not in migrated
+    body = json.loads(migrated)
+    assert body["key"] == {"pass": "analyzer_identity", "identity": _receipt_slug("build-b")}
+    assert body["binary"]["identity"] == _receipt_slug("build-b")

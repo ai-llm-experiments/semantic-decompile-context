@@ -125,7 +125,7 @@ def render_toml_config(existing: str, entry: dict[str, object], url: str, transp
             f"env = {{ AGENT_DECOMPILE_WEBUI_ENABLED = \"false\" }}\n"
         )
     else:
-        block = f'{header}\nurl = "{url}"\n'
+        block = f"{header}\nurl = {json.dumps(url)}\n"
     pattern = re.compile(rf"^\[mcp_servers\.{re.escape(SERVER_NAME)}\]\n(?:(?!\[).*\n?)*", re.MULTILINE)
     if pattern.search(existing):
         return pattern.sub(block, existing, count=1)
